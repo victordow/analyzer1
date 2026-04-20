@@ -160,6 +160,68 @@ def test_classify_two_barrier_ordering() -> None:
     assert mkt.strike_primary == 80_000.0
     assert mkt.strike_secondary == 100_000.0
 
+# ─────────────────────────────────────────────────────
+# DIP-TO (direction_below via touch) — títulos reais do Polymarket
+# ─────────────────────────────────────────────────────
+
+def test_classify_dip_to_real() -> None:
+    """Título real: 'Will Bitcoin dip to $60,000 in April?'"""
+    spots = {"BTCUSDT": 90_000}
+    mkt = classify_and_parse("Will Bitcoin dip to $60,000 in April?", spot_by_symbol=spots)
+    assert mkt.market_type == MarketType.STRIKE_TOUCH
+    assert mkt.strike_primary == 60_000.0
+    assert mkt.direction_above is False
+    assert mkt.parse_confidence == 1.0
+
+def test_classify_fall_to() -> None:
+    spots = {"ETHUSDT": 3800}
+    mkt = classify_and_parse("Will Ethereum fall to $3000 in April?", spot_by_symbol=spots)
+    assert mkt.market_type == MarketType.STRIKE_TOUCH
+    assert mkt.direction_above is False
+
+def test_classify_drop_to() -> None:
+    spots = {"SOLUSDT": 180}
+    mkt = classify_and_parse("Will Solana drop to $100 in April?", spot_by_symbol=spots)
+    assert mkt.market_type == MarketType.STRIKE_TOUCH
+    assert mkt.direction_above is False
+
+def test_classify_crash_to() -> None:
+    spots = {"BTCUSDT": 90_000}
+    mkt = classify_and_parse("Will Bitcoin crash to $50,000 in April?", spot_by_symbol=spots)
+    assert mkt.market_type == MarketType.STRIKE_TOUCH
+    assert mkt.direction_above is False
+
+def test_classify_dip_rejects_absurd_strike() -> None:
+    """Dip to $20k quando BTC=90k → ratio 0.22, sanity rejeita."""
+    spots = {"BTCUSDT": 90_000}
+    mkt = classify_and_parse("Will Bitcoin dip to $20,000 in April?", spot_by_symbol=spots)
+    assert mkt.parse_confidence == 0.0
+
+# ─────────────────────────────────────────────────────
+# SPOT_BY_SYMBOL — sanity correto por par
+# ─────────────────────────────────────────────────────
+
+def test_spot_by_symbol_eth_correct() -> None:
+    """ETH=$3800, K=$4000 → ratio 1.05, aceita (antes rejeitava usando spot BTC)"""
+    spots = {"BTCUSDT": 90_000, "ETHUSDT": 3800}
+    mkt = classify_and_parse("Will Ethereum reach $4,000 in April?", spot_by_symbol=spots)
+    assert mkt.parse_confidence == 1.0
+    assert mkt.strike_primary == 4000.0
+    assert mkt.symbol == "ETHUSDT"
+
+def test_spot_by_symbol_btc_independent() -> None:
+    """BTC e ETH sanity não se interferem."""
+    spots = {"BTCUSDT": 90_000, "ETHUSDT": 3800}
+    mkt_btc = classify_and_parse("Will Bitcoin reach $100k in April?", spot_by_symbol=spots)
+    assert mkt_btc.parse_confidence == 1.0
+    mkt_eth = classify_and_parse("Will Ethereum reach $5000 in April?", spot_by_symbol=spots)
+    assert mkt_eth.parse_confidence == 1.0
+
+def test_spot_by_symbol_legacy_fallback() -> None:
+    """Se passar spot_for_sanity antigo (legacy) ainda funciona."""
+    mkt = classify_and_parse("Will Bitcoin reach $100k in April?", spot_for_sanity=90_000)
+    assert mkt.parse_confidence == 1.0
+
 def test_classify_up_down_implicit_real() -> None:
     """Título real: 'Bitcoin Up or Down - March 8, 8AM ET'"""
     mkt = classify_and_parse("Bitcoin Up or Down - March 8, 8AM ET")
@@ -471,6 +533,14 @@ def run_all() -> int:
         test_classify_touch_hit,
         test_classify_two_barrier_real,
         test_classify_two_barrier_ordering,
+        test_classify_dip_to_real,
+        test_classify_fall_to,
+        test_classify_drop_to,
+        test_classify_crash_to,
+        test_classify_dip_rejects_absurd_strike,
+        test_spot_by_symbol_eth_correct,
+        test_spot_by_symbol_btc_independent,
+        test_spot_by_symbol_legacy_fallback,
         test_classify_up_down_implicit_real,
         test_classify_no_dollar,
         # Sanity

@@ -53,8 +53,8 @@ from polymarket_client import (
     PolymarketMarket, discover_markets, run_clob_stream,
 )
 from detector import (
-    DetectorState, OpportunityRecord, STRATEGY_A_TAU_MAX_SEC,
-    STRATEGY_B_TAU_MIN_SEC, evaluate_market,
+    DetectorState, OpportunityRecord, STRATEGY_A_TAU_MIN_SEC,
+    STRATEGY_B_TAU_MAX_SEC, evaluate_market,
 )
 
 # ─────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ from detector import (
 # ─────────────────────────────────────────────────────
 
 DEFAULT_DURATION_HOURS = 18.0
-DEFAULT_MIN_VOLUME_USD = 500.0
+DEFAULT_MIN_VOLUME_USD = 1000.0
 
 DETECTION_INTERVAL_SEC = 0.5
 PERSIST_INTERVAL_SEC = 900       # 15 min
@@ -182,8 +182,8 @@ async def run_discovery_and_subscribe(az: Analyzer) -> None:
         markets = await discover_markets(
             spot_snapshot=spot_snapshot,
             min_volume_usd=az.min_volume_usd,
-            tau_min_sec=STRATEGY_B_TAU_MIN_SEC,
-            tau_max_sec=STRATEGY_A_TAU_MAX_SEC,
+            tau_min_sec=STRATEGY_A_TAU_MIN_SEC,
+            tau_max_sec=STRATEGY_B_TAU_MAX_SEC,
         )
     except Exception as exc:
         az.log(f"[discovery] erro: {type(exc).__name__}: {exc}", level="WARN")

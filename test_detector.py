@@ -150,19 +150,20 @@ def make_healthy_books(
 # ─────────────────────────────────────────────────────
 
 def test_strategy_A() -> None:
-    assert classify_strategy(30 * 60) == "A"     # 30min no meio de A
-    assert classify_strategy(STRATEGY_A_TAU_MIN_SEC) == "A"
-    assert classify_strategy(STRATEGY_A_TAU_MAX_SEC) == "A"
+    assert classify_strategy(4 * 3600) == "A"               # 4h: meio de A
+    assert classify_strategy(STRATEGY_A_TAU_MIN_SEC) == "A"  # 1h: limite inferior
+    assert classify_strategy(STRATEGY_A_TAU_MAX_SEC) == "A"  # 24h: limite superior
 
 def test_strategy_B() -> None:
-    assert classify_strategy(5 * 60) == "B"       # 5min no meio de B
-    assert classify_strategy(STRATEGY_B_TAU_MIN_SEC) == "B"
-    assert classify_strategy(STRATEGY_A_TAU_MIN_SEC - 1) == "B"
+    assert classify_strategy(3 * 24 * 3600) == "B"            # 3 dias: meio de B
+    assert classify_strategy(STRATEGY_A_TAU_MAX_SEC + 1) == "B"
+    assert classify_strategy(STRATEGY_B_TAU_MAX_SEC) == "B"    # 7d: limite superior
 
 def test_strategy_out_of_range() -> None:
-    assert classify_strategy(30) is None           # abaixo de B
-    assert classify_strategy(STRATEGY_A_TAU_MAX_SEC + 1) is None
-    assert classify_strategy(7200) is None         # 2h
+    assert classify_strategy(30 * 60) is None                  # 30min: abaixo de A
+    assert classify_strategy(30) is None                        # 30s
+    assert classify_strategy(STRATEGY_B_TAU_MAX_SEC + 1) is None
+    assert classify_strategy(30 * 24 * 3600) is None           # 30 dias
 
 
 # ─────────────────────────────────────────────────────
@@ -172,7 +173,7 @@ def test_strategy_out_of_range() -> None:
 def test_reject_spot_stale() -> None:
     now = 10_000_000
     st = DetectorState()
-    m = make_market_at_time(end_in_sec=1800, now_ms=now)
+    m = make_market_at_time(end_in_sec=4*3600, now_ms=now)
     spot_stale = SpotQuote("BTCUSDT", 95_000, 1, 95_001, 1, last_update_ms=now - 20_000)  # 20s velho
     vol = make_vol()
     books = make_healthy_books(now_ms=now)
@@ -184,7 +185,7 @@ def test_reject_spot_stale() -> None:
 def test_reject_book_stale() -> None:
     now = 10_000_000
     st = DetectorState()
-    m = make_market_at_time(end_in_sec=1800, now_ms=now)
+    m = make_market_at_time(end_in_sec=4*3600, now_ms=now)
     books = make_healthy_books(now_ms=now - 40_000)  # 40s velho
     r = evaluate_market(m, books, make_spot(now_ms=now), make_vol(), st, now)
     assert r is None
@@ -193,7 +194,7 @@ def test_reject_book_stale() -> None:
 def test_reject_book_terminal() -> None:
     now = 10_000_000
     st = DetectorState()
-    m = make_market_at_time(end_in_sec=1800, now_ms=now)
+    m = make_market_at_time(end_in_sec=4*3600, now_ms=now)
     # Book terminal: best_bid < 0.02
     books = MarketBooks(
         market_id="mkt_test",
@@ -215,17 +216,17 @@ def test_reject_book_terminal() -> None:
 def test_reject_depth_too_low() -> None:
     now = 10_000_000
     st = DetectorState()
-    m = make_market_at_time(end_in_sec=1800, now_ms=now)
+    m = make_market_at_time(end_in_sec=4*3600, now_ms=now)
     books = make_healthy_books(depth_notional=100, now_ms=now)  # só $100 total
     r = evaluate_market(m, books, make_spot(now_ms=now), make_vol(), st, now)
     assert r is None
     assert any(a.get("rejection") == "depth_too_low" for a in st.audit_records)
 
 def test_reject_tau_out_of_range() -> None:
-    """τ=5h fora de A (máx 1h)."""
+    """τ=10 dias fora de B (máx 7d)."""
     now = 10_000_000
     st = DetectorState()
-    m = make_market_at_time(end_in_sec=5 * 3600, now_ms=now)  # 5h
+    m = make_market_at_time(end_in_sec=10*24*3600, now_ms=now)  # 10 dias
     r = evaluate_market(
         m, make_healthy_books(now_ms=now), make_spot(now_ms=now), make_vol(), st, now,
     )
@@ -235,7 +236,7 @@ def test_reject_tau_out_of_range() -> None:
 def test_reject_vol_insufficient() -> None:
     now = 10_000_000
     st = DetectorState()
-    m = make_market_at_time(end_in_sec=1800, now_ms=now)
+    m = make_market_at_time(end_in_sec=4*3600, now_ms=now)
     vol_bad = VolEstimate(
         symbol="BTCUSDT", sigma_60=0.5, sigma_10=0.5,
         n_valid_60=20, n_valid_10=10, computed_at_ms=0, regime_divergence=0.0,
@@ -270,7 +271,7 @@ def test_happy_path_long_flagged() -> None:
     """
     now = 10_000_000
     st = DetectorState()
-    m = make_market_at_time(strike=100_000, direction_above=True, end_in_sec=1800, now_ms=now)
+    m = make_market_at_time(strike=100_000, direction_above=True, end_in_sec=4*3600, now_ms=now)
     spot = make_spot(s=99_000, now_ms=now)
     vol = make_vol(sigma=0.5)
     books = make_healthy_books(yes_bid=0.40, yes_ask=0.42, depth_notional=2000, now_ms=now)
@@ -286,7 +287,7 @@ def test_happy_path_no_flag_small_delta() -> None:
     """Spot muito próximo de K → P_model ~ 0.5, p_market ~ 0.5 → delta pequeno."""
     now = 10_000_000
     st = DetectorState()
-    m = make_market_at_time(strike=95_000, direction_above=True, end_in_sec=1800, now_ms=now)
+    m = make_market_at_time(strike=95_000, direction_above=True, end_in_sec=4*3600, now_ms=now)
     spot = make_spot(s=95_000, now_ms=now)  # at-money
     vol = make_vol(sigma=0.5)
     books = make_healthy_books(yes_bid=0.48, yes_ask=0.50, depth_notional=2000, now_ms=now)
@@ -330,7 +331,7 @@ def test_dedupe_same_opportunity_two_ticks() -> None:
     """
     now = 10_000_000
     st = DetectorState()
-    m = make_market_at_time(strike=100_000, direction_above=True, end_in_sec=1800, now_ms=now)
+    m = make_market_at_time(strike=100_000, direction_above=True, end_in_sec=4*3600, now_ms=now)
     spot = make_spot(s=99_000, now_ms=now)
     vol = make_vol(sigma=0.5)
     books = make_healthy_books(yes_bid=0.40, yes_ask=0.42, depth_notional=2000, now_ms=now)
@@ -356,7 +357,7 @@ def test_dedupe_same_opportunity_two_ticks() -> None:
 def test_window_closes_when_delta_drops() -> None:
     now = 10_000_000
     st = DetectorState()
-    m = make_market_at_time(strike=100_000, direction_above=True, end_in_sec=1800, now_ms=now)
+    m = make_market_at_time(strike=100_000, direction_above=True, end_in_sec=4*3600, now_ms=now)
     spot = make_spot(s=99_000, now_ms=now)
     vol = make_vol(sigma=0.5)
     # Tick 1: delta grande, flag
@@ -381,7 +382,7 @@ def test_reopen_gap_respected() -> None:
     """Janela fechada não reabre antes de REOPEN_GAP_MS."""
     now = 10_000_000
     st = DetectorState()
-    m = make_market_at_time(strike=100_000, direction_above=True, end_in_sec=1800, now_ms=now)
+    m = make_market_at_time(strike=100_000, direction_above=True, end_in_sec=4*3600, now_ms=now)
     vol = make_vol(sigma=0.5)
     # Abre e fecha rapidamente
     evaluate_market(
@@ -419,7 +420,7 @@ def test_two_barrier_middle() -> None:
     """S entre k_low e k_high → P_model teórica ~ log-linear."""
     now = 10_000_000
     st = DetectorState()
-    m = make_market_two_barrier(k_low=80_000, k_high=100_000, end_in_sec=1800, now_ms=now)
+    m = make_market_two_barrier(k_low=80_000, k_high=100_000, end_in_sec=4*3600, now_ms=now)
     # S=89442 (sqrt 80k*100k) → P(high) ≈ 0.5
     spot = make_spot(s=89_442, now_ms=now)
     vol = make_vol()

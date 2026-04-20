@@ -67,6 +67,60 @@ def test_parse_end_time_with_offset() -> None:
     ms = parse_end_time("2026-04-20T21:00:00+00:00")
     assert ms == 1_776_718_800_000
 
+# ─────────────────────────────────────────────────────
+# FILTRO CRYPTO CANDIDATE (nova discovery via /markets)
+# ─────────────────────────────────────────────────────
+
+def test_market_is_crypto_candidate_accepts() -> None:
+    from polymarket_client import _market_is_crypto_candidate
+    assert _market_is_crypto_candidate({"question": "Will Bitcoin reach $150,000 in April?"})
+    assert _market_is_crypto_candidate({"question": "Will the price of Bitcoin be above $66,000 on April 21?"})
+    assert _market_is_crypto_candidate({"question": "Will Ethereum fall to $3000?"})
+    assert _market_is_crypto_candidate({"question": "Will Solana dip to $100 in April?"})
+
+def test_market_is_crypto_candidate_rejects_no_dollar() -> None:
+    from polymarket_client import _market_is_crypto_candidate
+    assert not _market_is_crypto_candidate({"question": "Will Bitcoin go up?"})
+    assert not _market_is_crypto_candidate({"question": "Bitcoin Up or Down - April 21"})
+
+def test_market_is_crypto_candidate_rejects_non_crypto() -> None:
+    from polymarket_client import _market_is_crypto_candidate
+    assert not _market_is_crypto_candidate({"question": "Will TSLA be above $300 on April 21?"})
+    assert not _market_is_crypto_candidate({"question": "Trump wins $100M lawsuit?"})
+
+def test_market_is_crypto_candidate_empty() -> None:
+    from polymarket_client import _market_is_crypto_candidate
+    assert not _market_is_crypto_candidate({"question": ""})
+    assert not _market_is_crypto_candidate({})
+
+
+# ─────────────────────────────────────────────────────
+# BUILD MARKET VIA /markets (sem event)
+# ─────────────────────────────────────────────────────
+
+def test_build_market_from_markets_endpoint() -> None:
+    """Chamada com event=None simula /markets direto."""
+    m = _make_market_dict(
+        question="Will Bitcoin reach $150,000 in April?",
+        end_date="2026-04-30T23:59:00Z",
+    )
+    spots = {"BTCUSDT": 90_000}
+    pm = build_polymarket_market(event=None, market=m, spot_by_symbol=spots)
+    assert pm is not None
+    assert pm.parsed.market_type == MarketType.STRIKE_TOUCH
+    assert pm.parsed.strike_primary == 150_000
+
+def test_build_market_prefers_volume24hr() -> None:
+    """Se volume24hr existe, usa ele em vez de volume total."""
+    m = _make_market_dict(question="Will Bitcoin reach $100k in April?")
+    m["volume24hr"] = 5000.0
+    m["volume"] = 999999.0
+    spots = {"BTCUSDT": 90_000}
+    pm = build_polymarket_market(event=None, market=m, spot_by_symbol=spots)
+    assert pm is not None
+    assert pm.volume_usd == 5000.0
+
+
 def test_parse_end_time_invalid() -> None:
     assert parse_end_time(None) is None
     assert parse_end_time("") is None
@@ -309,6 +363,12 @@ def test_book_freshness_check() -> None:
 
 def run_all() -> int:
     tests = [
+        test_market_is_crypto_candidate_accepts,
+        test_market_is_crypto_candidate_rejects_no_dollar,
+        test_market_is_crypto_candidate_rejects_non_crypto,
+        test_market_is_crypto_candidate_empty,
+        test_build_market_from_markets_endpoint,
+        test_build_market_prefers_volume24hr,
         test_parse_end_time_iso_z,
         test_parse_end_time_with_offset,
         test_parse_end_time_invalid,

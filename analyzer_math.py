@@ -134,6 +134,12 @@ _TOUCH_KEYWORDS = re.compile(
     flags=re.IGNORECASE,
 )
 
+# "dip to" / "fall to" / "drop to" são touch + direction_below
+_DIP_KEYWORDS = re.compile(
+    r"\b(dip\s+to|fall\s+to|drop\s+to|crash\s+to)\b",
+    flags=re.IGNORECASE,
+)
+
 _AT_TIME_KEYWORDS = re.compile(
     r"\b(at|close\s+above|close\s+below|closing\s+above|closing\s+below|be\s+above|be\s+below|end\s+above|end\s+below)\b",
     flags=re.IGNORECASE,
@@ -163,11 +169,17 @@ def detect_symbol(title: str) -> Optional[str]:
     return ACCEPTED_SYMBOLS.get(raw)
 
 
-def classify_and_parse(title: str, spot_for_sanity: float | None = None) -> ParsedMarket:
+def classify_and_parse(
+    title: str,
+    spot_for_sanity: float | None = None,
+    spot_by_symbol: dict[str, float] | None = None,
+) -> ParsedMarket:
     """
     Retorna ParsedMarket completo. Se parse_confidence < 0.5, rejeitar no consumer.
 
-    spot_for_sanity: S_t atual (opcional) — se fornecido, rejeita K absurdo.
+    spot_for_sanity: S_t atual de UM símbolo qualquer (legado, deprecated). Se passar
+                     spot_by_symbol, sanity usa o spot CORRETO do símbolo detectado.
+    spot_by_symbol: {symbol_binance: spot_mid} — recomendado, mais preciso.
     """
     symbol = detect_symbol(title)
     if symbol is None:
@@ -177,6 +189,13 @@ def classify_and_parse(title: str, spot_for_sanity: float | None = None) -> Pars
             direction_above=None, parse_confidence=0.0,
             parse_notes="no crypto symbol matched",
         )
+
+    # Determinar spot pra sanity: prioriza spot_by_symbol[symbol]
+    sanity_spot: Optional[float] = None
+    if spot_by_symbol is not None and symbol in spot_by_symbol:
+        sanity_spot = spot_by_symbol[symbol]
+    elif spot_for_sanity is not None:
+        sanity_spot = spot_for_sanity
 
     # Tipo 1: UP/DOWN implícito
     if _UP_DOWN_PATTERN.search(title):
@@ -199,7 +218,7 @@ def classify_and_parse(title: str, spot_for_sanity: float | None = None) -> Pars
             direction_above=None, parse_confidence=1.0,
             parse_notes="two-barrier (touch first)",
         )
-        return _apply_spot_sanity(mkt, spot_for_sanity)
+        return _apply_spot_sanity(mkt, sanity_spot)
 
     # Tipos 3 e 4: strike único (at_time ou touch)
     if len(dollars) < 1:
@@ -215,6 +234,20 @@ def classify_and_parse(title: str, spot_for_sanity: float | None = None) -> Pars
     # Direção: above/below?
     has_above = bool(_ABOVE_KEYWORDS.search(title))
     has_below = bool(_BELOW_KEYWORDS.search(title))
+    has_dip = bool(_DIP_KEYWORDS.search(title))
+
+    if has_dip:
+        # "dip to X" / "fall to X" / "drop to X" sempre é touch direction_below
+        return _apply_spot_sanity(
+            ParsedMarket(
+                market_type=MarketType.STRIKE_TOUCH, symbol=symbol,
+                strike_primary=k, strike_secondary=None,
+                direction_above=False, parse_confidence=1.0,
+                parse_notes="dip-to (american-style, touch below)",
+            ),
+            sanity_spot,
+        )
+
     if has_above and not has_below:
         direction = True
     elif has_below and not has_above:
@@ -249,7 +282,7 @@ def classify_and_parse(title: str, spot_for_sanity: float | None = None) -> Pars
         direction_above=direction, parse_confidence=1.0,
         parse_notes=notes,
     )
-    return _apply_spot_sanity(mkt, spot_for_sanity)
+    return _apply_spot_sanity(mkt, sanity_spot)
 
 
 def _apply_spot_sanity(mkt: ParsedMarket, spot: float | None) -> ParsedMarket:

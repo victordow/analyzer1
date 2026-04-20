@@ -195,7 +195,7 @@ async def fetch_events_by_tag(
     client: Optional[Any] = None,
 ) -> list[dict]:
     """
-    GET /events?tag_id=<tag>&active=true&closed=false, paginated.
+    [Legado, mantido pra compat] GET /events?tag_id=<tag>, paginated.
     """
     if not HAS_HTTPX:
         raise RuntimeError("httpx not installed")
@@ -205,7 +205,7 @@ async def fetch_events_by_tag(
     try:
         if owns_client:
             client = httpx.AsyncClient(base_url=GAMMA_BASE, timeout=20.0)
-        for _ in range(20):  # até 20 páginas (4000 markets max) — defensivo
+        for _ in range(20):
             params = {
                 "tag_id": tag_id,
                 "limit": 200,
@@ -231,19 +231,97 @@ async def fetch_events_by_tag(
             await client.aclose()
 
 
+# Universo de tokens aceitos pro filtro textual (descoberta nova).
+# Match case-insensitive. Incluimos nome completo + tickers.
+_CRYPTO_KEYWORDS_FOR_SEARCH = [
+    "bitcoin", "ethereum", "solana", "xrp", "dogecoin", "bnb",
+    "btc", "eth", "sol", "doge",
+]
+
+
+def _market_is_crypto_candidate(market: dict) -> bool:
+    """Heurística leve pra pré-filtrar markets com chance de ser crypto-strike."""
+    question = (market.get("question") or "").lower()
+    if not question:
+        return False
+    # Precisa ter $ no título (strike explícito)
+    if "$" not in (market.get("question") or ""):
+        return False
+    # Precisa mencionar alguma crypto
+    return any(k in question for k in _CRYPTO_KEYWORDS_FOR_SEARCH)
+
+
+async def fetch_markets_crypto(
+    client: Optional[Any] = None,
+    max_pages: int = 10,
+    page_size: int = 500,
+) -> list[dict]:
+    """
+    GET /markets?limit=N&active=true&closed=false&order=volume24hr&ascending=false
+
+    Retorna mercados crypto candidatos (filtro textual por símbolo + $).
+    Paginação por offset até max_pages ou fim da resposta.
+
+    Uso o endpoint /markets (não /events) porque:
+    - Cada item já é um market completo (não precisa explodir event.markets[])
+    - Pode ordenar por volume24hr (volume ativo, não histórico)
+    - Filtro textual pos-fetch evita depender de tag_id específica
+    """
+    if not HAS_HTTPX:
+        raise RuntimeError("httpx not installed")
+    owns_client = client is None
+    collected: list[dict] = []
+    offset = 0
+    try:
+        if owns_client:
+            client = httpx.AsyncClient(base_url=GAMMA_BASE, timeout=20.0)
+        for _ in range(max_pages):
+            params = {
+                "limit": page_size,
+                "offset": offset,
+                "active": "true",
+                "closed": "false",
+                "order": "volume24hr",
+                "ascending": "false",
+            }
+            try:
+                resp = await client.get("/markets", params=params)
+                resp.raise_for_status()
+                batch = resp.json()
+            except Exception:
+                break
+            if not isinstance(batch, list) or not batch:
+                break
+            for m in batch:
+                if isinstance(m, dict) and _market_is_crypto_candidate(m):
+                    collected.append(m)
+            if len(batch) < page_size:
+                break
+            offset += page_size
+        return collected
+    finally:
+        if owns_client and client is not None:
+            await client.aclose()
+
+
 def build_polymarket_market(
-    event: dict,
+    event: Optional[dict],
     market: dict,
     spot_for_sanity: Optional[float] = None,
+    spot_by_symbol: Optional[dict[str, float]] = None,
 ) -> Optional[PolymarketMarket]:
     """
     Converte 1 (event, market) par pra PolymarketMarket.
+
+    event pode ser None quando descoberta vem direto de /markets.
 
     Retorna None se:
     - Não é tradable / não tem tokens
     - Parse de título não classificou
     - Tipo não é aceito no MVP
     """
+    event = event or {}
+
     # Tradable?
     if not market.get("enableOrderBook"):
         return None
@@ -265,7 +343,11 @@ def build_polymarket_market(
     if not title:
         return None
 
-    parsed = classify_and_parse(title, spot_for_sanity=spot_for_sanity)
+    parsed = classify_and_parse(
+        title,
+        spot_for_sanity=spot_for_sanity,
+        spot_by_symbol=spot_by_symbol,
+    )
     if parsed.parse_confidence < 0.5:
         return None
     if parsed.market_type not in ACCEPTED_TYPES:
@@ -275,8 +357,10 @@ def build_polymarket_market(
     if end_time_ms is None:
         return None
 
-    # Volume do mercado (ou do event, fallback)
-    vol = parse_float_safe(market.get("volume"), 0.0)
+    # Volume: preferir volume24hr (atividade atual), fallback pra volume total
+    vol = parse_float_safe(market.get("volume24hr"), 0.0)
+    if vol == 0.0:
+        vol = parse_float_safe(market.get("volume"), 0.0)
     if vol == 0.0:
         vol = parse_float_safe(event.get("volume"), 0.0)
 
@@ -300,45 +384,36 @@ def build_polymarket_market(
 async def discover_markets(
     client: Optional[Any] = None,
     spot_snapshot: Optional[dict[str, float]] = None,
-    min_volume_usd: float = 500.0,
-    tau_min_sec: int = 60,
-    tau_max_sec: int = 3600,
+    min_volume_usd: float = 1000.0,
+    tau_min_sec: int = 60 * 60,               # 1h (mínimo da estratégia A)
+    tau_max_sec: int = 7 * 24 * 60 * 60,      # 7 dias (máximo da estratégia B)
 ) -> list[PolymarketMarket]:
     """
-    Descobre mercados crypto hourly ativos.
+    Descobre mercados crypto com strike explícito (ex: "Will Bitcoin reach $X in April?").
 
-    - spot_snapshot: {symbol: spot_price} pra sanity K/S
-    - min_volume_usd: default 500 (analyzer é read-only, volume baixo aceito)
-    - tau_min/max_sec: janela temporal aceita
+    - spot_snapshot: {symbol: spot_price} pra sanity K/S (passado direto pro parser)
+    - min_volume_usd: default 1000 (filtrar dust antes mesmo de subscribe WS)
+    - tau_min/max_sec: janela temporal aceita. Default cobre A e B.
 
-    Rejeita mercados fora da janela e fora do universe approved.
+    Rejeita mercados fora da janela e sem strike explícito.
     """
-    events = await fetch_events_by_tag(TAG_HOURLY_CRYPTO, client=client)
+    raw_markets = await fetch_markets_crypto(client=client)
     out: list[PolymarketMarket] = []
     now_ms = int(time.time() * 1000)
 
-    for ev in events:
-        markets = ev.get("markets") or []
-        for m in markets:
-            # Determinar spot pra sanity — precisa do símbolo antes
-            # classify_and_parse já detecta símbolo, mas precisamos dele pra olhar spot
-            title_preview = m.get("question") or ev.get("title") or ""
-            from analyzer_math import detect_symbol
-            symbol = detect_symbol(title_preview)
-            spot_for_sanity = None
-            if symbol and spot_snapshot is not None:
-                spot_for_sanity = spot_snapshot.get(symbol)
-
-            pm = build_polymarket_market(ev, m, spot_for_sanity=spot_for_sanity)
-            if pm is None:
-                continue
-            if pm.volume_usd < min_volume_usd:
-                continue
-            # Filtro temporal
-            tau_sec = (pm.end_time_ms - now_ms) / 1000.0
-            if tau_sec < tau_min_sec or tau_sec > tau_max_sec:
-                continue
-            out.append(pm)
+    for m in raw_markets:
+        pm = build_polymarket_market(
+            event=None, market=m,
+            spot_by_symbol=spot_snapshot,
+        )
+        if pm is None:
+            continue
+        if pm.volume_usd < min_volume_usd:
+            continue
+        tau_sec = (pm.end_time_ms - now_ms) / 1000.0
+        if tau_sec < tau_min_sec or tau_sec > tau_max_sec:
+            continue
+        out.append(pm)
     return out
 
 

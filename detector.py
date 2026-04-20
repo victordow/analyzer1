@@ -39,11 +39,12 @@ from polymarket_client import MarketBooks, OutcomeBook, PolymarketMarket
 # ─────────────────────────────────────────────────────
 
 # Estratégia A: τ ∈ [15min, 1h]
-STRATEGY_A_TAU_MIN_SEC = 15 * 60
-STRATEGY_A_TAU_MAX_SEC = 60 * 60
-# Estratégia B: τ ∈ [60s, 15min]
-STRATEGY_B_TAU_MIN_SEC = 60
-STRATEGY_B_TAU_MAX_SEC = 15 * 60
+# Estratégia A: τ ∈ [1h, 24h] (curto prazo: "above $X on April 21")
+STRATEGY_A_TAU_MIN_SEC = 60 * 60                # 1h
+STRATEGY_A_TAU_MAX_SEC = 24 * 60 * 60           # 24h
+# Estratégia B: τ ∈ [24h, 7 dias] (médio: "reach $X in April")
+STRATEGY_B_TAU_MIN_SEC = 24 * 60 * 60           # 24h
+STRATEGY_B_TAU_MAX_SEC = 7 * 24 * 60 * 60       # 7 dias
 
 # Threshold abaixo do qual P_model é indefinido (numericamente)
 MODEL_UNDEFINED_TAU_SEC = 60
@@ -162,10 +163,16 @@ def tau_sec_to_years(tau_sec: float) -> float:
 
 
 def classify_strategy(tau_sec: float) -> Optional[str]:
-    """'A' / 'B' / None se fora das janelas."""
+    """
+    'A' / 'B' / None se fora das janelas.
+
+    A: [1h, 24h]   — curto prazo, tipo "above $X on April 21"
+    B: (24h, 7d]   — médio prazo, tipo "reach $X in April"
+    Note: na fronteira (24h exato) classifica como A.
+    """
     if STRATEGY_A_TAU_MIN_SEC <= tau_sec <= STRATEGY_A_TAU_MAX_SEC:
         return "A"
-    if STRATEGY_B_TAU_MIN_SEC <= tau_sec < STRATEGY_A_TAU_MIN_SEC:
+    if STRATEGY_A_TAU_MAX_SEC < tau_sec <= STRATEGY_B_TAU_MAX_SEC:
         return "B"
     return None
 
@@ -404,7 +411,7 @@ def evaluate_market(
     if strategy == "A":
         tau_max_years = tau_sec_to_years(STRATEGY_A_TAU_MAX_SEC)
     elif strategy == "B":
-        tau_max_years = tau_sec_to_years(STRATEGY_A_TAU_MIN_SEC)  # B usa [60s, 15min], max=15min
+        tau_max_years = tau_sec_to_years(STRATEGY_B_TAU_MAX_SEC)
     else:
         tau_max_years = tau_sec_to_years(MODEL_UNDEFINED_TAU_SEC)
     w = urgency_weight(tau_years, tau_max_years)
@@ -550,9 +557,15 @@ def evaluate_market(
 
     # 14. Dedupe por janela
     if flagged:
+        # Se há janela aberta em direção oposta, fecha primeiro (flip de sinal)
+        opposite = "LONG_YES" if direction_label == "SHORT_YES" else "SHORT_YES"
+        _close_window_if_open(state, market.market_id, opposite, now_ms)
         return _open_or_update_window(state, record, now_ms)
     else:
-        return _close_window_if_open(state, market.market_id, direction_label, now_ms)
+        # Não flagged — fecha qualquer janela aberta desse market
+        for dir_label in ("LONG_YES", "SHORT_YES"):
+            _close_window_if_open(state, market.market_id, dir_label, now_ms)
+        return None
 
 
 def _reject(
