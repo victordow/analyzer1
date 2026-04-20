@@ -1,0 +1,4 @@
+pandas>=2.0
+pyarrow>=10
+httpx>=0.27
+websockets>=12
